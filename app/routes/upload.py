@@ -12,7 +12,7 @@ router = APIRouter()
 bq_client = bigquery.Client()
 TABLE_ID = "pivotal-canto-466205-p6.intent_inference.Orders"
 
-# BigQuery schema (keep as is)
+# BigQuery schema 
 SCHEMA = [
     bigquery.SchemaField("order_id", "INTEGER", mode="NULLABLE"),
     bigquery.SchemaField("user_id", "INTEGER", mode="NULLABLE"),
@@ -34,61 +34,70 @@ SCHEMA = [
 
 from fastapi import Form
 
+
+# --- New incremental upload logic ---
+import os
+import tempfile
+
+UPLOAD_TMP_DIR = os.path.join(tempfile.gettempdir(), "intent_uploads")
+os.makedirs(UPLOAD_TMP_DIR, exist_ok=True)
+
 @router.post("/upload", response_model=UploadResult)
 async def upload_csv(file: UploadFile = File(...), user_id: str = Form(None)):
     print(f"DEBUG: Received user_id={user_id}, file={file.filename if file else None}")
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id is required in the form data.")
-    # --- Step 1: Validate file type ---
     if not file.filename or not file.filename.endswith(".csv"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Please upload exactly 3 CSV files: orders, order_products, and products."
+            detail="File must be a CSV."
         )
 
-    dfs = {}
+    # Save uploaded file to temp dir, named by user_id and file type
+    content = await file.read()
+    df = pd.read_csv(BytesIO(content))
+    print(f"DEBUG: Uploaded file columns: {list(df.columns)} shape: {df.shape}")
+    cols = set(df.columns)
+    if {"order_id", "user_id", "order_date", "Total cost"} <= cols:
+        file_type = "orders"
+    elif {"order_id", "product_id"} <= cols:
+        file_type = "order_products"
+    elif {"product_id", "product_name"} <= cols:
+        file_type = "products"
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown schema in file {file.filename}"
+        )
+    user_dir = os.path.join(UPLOAD_TMP_DIR, user_id)
+    os.makedirs(user_dir, exist_ok=True)
+    file_path = os.path.join(user_dir, f"{file_type}.csv")
+    df.to_csv(file_path, index=False)
+    print(f"Saved {file_type} for user {user_id} to {file_path}")
+
+    # Check if all three files are present
+    expected = ["orders.csv", "order_products.csv", "products.csv"]
+    present = [os.path.exists(os.path.join(user_dir, f)) for f in expected]
+    if not all(present):
+        # Only acknowledge upload, don't process yet
+        return UploadResult(rows=len(df), columns=len(df.columns))
+
+    # All files present: process and upload
     try:
-        for file in files:
-            if not file.filename.endswith(".csv"):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Invalid file type for {file.filename}. Only CSVs are allowed."
-                )
+        dfs = {}
+        for fname in expected:
+            ftype = fname.replace(".csv", "")
+            dfs[ftype] = pd.read_csv(os.path.join(user_dir, fname))
+            print(f"DEBUG: {ftype} columns: {list(dfs[ftype].columns)} shape: {dfs[ftype].shape}")
 
-            content = await file.read()
-            df = pd.read_csv(BytesIO(content))
-
-            # Detect which file is which by its columns
-            cols = set(df.columns)
-            if {"order_id", "user_id", "order_date", "Total cost"} <= cols:
-                dfs["orders"] = df
-            elif {"order_id", "product_id"} <= cols:
-                dfs["order_products"] = df
-            elif {"product_id", "product_name"} <= cols:
-                dfs["products"] = df
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Unknown schema in file {file.filename}"
-                )
-
-        # --- Ensure all files present ---
-        for key in ["orders", "order_products", "products"]:
-            if key not in dfs:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Missing {key}.csv file."
-                )
-
-        # --- Merge ---
+       
         merged = dfs["order_products"].merge(dfs["products"], on="product_id", how="left")
+  
         grouped = merged.groupby("order_id")["product_name"].apply(list).reset_index()
-
-        # Join with orders table
         final_df = dfs["orders"].merge(grouped, on="order_id", how="left")
-
-        # Rename and clean
-        final_df.rename(columns={"product_name": "products"}, inplace=True)
+        # Ensure column is renamed before upload
+        if "product_name" in final_df.columns:
+            final_df.rename(columns={"product_name": "products"}, inplace=True)
         final_df["products"] = final_df["products"].apply(lambda x: x if isinstance(x, list) else [])
 
     except Exception as e:
@@ -137,17 +146,19 @@ async def upload_csv(file: UploadFile = File(...), user_id: str = Form(None)):
             job_config=dataset_job_config,
         )
         dataset_load_job.result()
-        print(f"Added dataset_id={new_dataset_id} for user_id={user_id} to Data sets table")
     except Exception as e:
-        print(f"Failed to add to Data sets table:", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to add dataset record: {e}"
         )
 
     # --- Step 5: Convert to JSON ---
+    import json
     try:
-        json_data = df.to_json(orient="records", lines=True)
+        # Use final_df, not df, for upload
+        records = final_df.to_dict(orient="records")
+        json_lines = [json.dumps(row, default=str) for row in records]
+        json_data = "\n".join(json_lines)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

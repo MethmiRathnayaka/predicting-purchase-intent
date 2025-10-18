@@ -32,9 +32,9 @@ def get_rfm_insights(user_id: str = Query(...)):
     # Query Orders for this dataset_id
     table_path = "pivotal-canto-466205-p6.intent_inference.Orders"
     query = f"""
-        SELECT `User name`, `order_date`, `order_id`, `Total cost`
+        SELECT `user_id`, `order_date`, `order_id`, `Total cost`
         FROM `{table_path}`
-        WHERE `User name` IS NOT NULL AND dataset_id = @dataset_id
+        WHERE `user_id` IS NOT NULL AND dataset_id = @dataset_id
         LIMIT 100000
     """
     job_config = bigquery.QueryJobConfig(
@@ -45,7 +45,7 @@ def get_rfm_insights(user_id: str = Query(...)):
     # Robust date parsing: let pandas infer the format, coerce errors to NaT
     data['order_date'] = pd.to_datetime(data['order_date'], errors='coerce')
     max_date = data['order_date'].max()
-    rfm = data.groupby('User name').agg({
+    rfm = data.groupby('user_id').agg({
         'order_date': lambda x: (max_date - x.max()).days,  # Recency
         'order_id': 'nunique',                              # Frequency
         'Total cost': 'sum'                                 # Monetary

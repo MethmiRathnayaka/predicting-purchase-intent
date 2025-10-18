@@ -112,7 +112,7 @@ export default function Sidebar() {
     <aside className="w-64 bg-gradient-to-b from-[#190621] to-[#090523] border-r border-[#23283a] min-h-screen flex flex-col py-6 shadow-xl">
       <div className="flex flex-col items-center mb-8">
         <span className="text-2xl font-extrabold text-[#ffffff] tracking-wide mb-2">
-          IntentMiner
+          InsightMiner
         </span>
         <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[#a259e6] to-[#23283a] flex items-center justify-center text-white mb-2 overflow-hidden">
           <img

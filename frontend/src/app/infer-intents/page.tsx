@@ -24,6 +24,14 @@ export default function InferIntentsPage() {
     }
     return null;
   });
+  // Track the absolute end timestamp so the effect starts immediately when set
+  const [countdownEnd, setCountdownEnd] = useState<number | null>(() => {
+    if (typeof window !== "undefined") {
+      const end = localStorage.getItem("infer_countdown_end");
+      return end ? Number(end) : null;
+    }
+    return null;
+  });
   const [progress, setProgress] = useState<{
     batch: number;
     total: number;
@@ -42,6 +50,16 @@ export default function InferIntentsPage() {
   });
   const [error, setError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const [sampleResults, setSampleResults] = useState<
+    Array<{ product: string; intent: string }>
+  >([]);
+  const [samplePage, setSamplePage] = useState(0); // 0-based page index
+  const SAMPLE_PAGE_SIZE = 10;
+  // Simulation refs for dummy inference
+  const DUMMY_MODE = true; // set to true to run locally without backend
+  const simTimerRef = useRef<number | null>(null);
+  const simBatchRef = useRef<number>(0);
+  const simTotalRef = useRef<number>(0);
 
   const options = [
     {
@@ -97,28 +115,31 @@ export default function InferIntentsPage() {
   ];
 
   // Countdown effect using end timestamp
+  // Runs on mount and whenever `countdown` changes so an interval starts immediately
   useEffect(() => {
-    let timer: NodeJS.Timeout;
-    if (typeof window !== "undefined") {
-      const end = localStorage.getItem("infer_countdown_end");
-      if (end) {
-        const updateCountdown = () => {
-          const diff = Math.floor((Number(end) - Date.now()) / 1000);
-          if (diff > 0) {
-            setCountdown(diff);
-          } else {
-            setCountdown(null);
+    let timer: number | undefined;
+    const end = countdownEnd;
+    if (end) {
+      const updateCountdown = () => {
+        const diff = Math.floor((end - Date.now()) / 1000);
+        if (diff > 0) {
+          setCountdown(diff);
+        } else {
+          setCountdown(null);
+          setCountdownEnd(null);
+          if (typeof window !== "undefined")
             localStorage.removeItem("infer_countdown_end");
-          }
-        };
-        updateCountdown();
-        timer = setInterval(updateCountdown, 1000);
-      } else {
-        setCountdown(null);
-      }
+        }
+      };
+      updateCountdown();
+      timer = window.setInterval(updateCountdown, 1000);
+    } else {
+      setCountdown(null);
     }
-    return () => clearInterval(timer);
-  }, []);
+    return () => {
+      if (timer) window.clearInterval(timer);
+    };
+  }, [countdownEnd]);
 
   // Persist selected, running, and progress
   useEffect(() => {
@@ -198,15 +219,168 @@ export default function InferIntentsPage() {
     const s = (sec % 60).toString().padStart(2, "0");
     return `${h}:${m}:${s}`;
   }
+
+  // Stop the countdown (cancel the pending full-dataset wait)
+  function stopCountdown() {
+    setCountdown(null);
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("infer_countdown_end");
+    }
+    // return to initial selection state
+    setSelected(null);
+    setCountdownEnd(null);
+  }
+
+  // Stop the running inference (close EventSource and clear state)
+  function stopInference() {
+    // Stop backend EventSource if present
+    if (eventSourceRef.current) {
+      try {
+        eventSourceRef.current.close();
+      } catch (e) {
+        // ignore
+      }
+      eventSourceRef.current = null;
+    }
+    // Stop simulated timer if running
+    if (simTimerRef.current) {
+      window.clearInterval(simTimerRef.current);
+      simTimerRef.current = null;
+    }
+    // Reset simulation state
+    simBatchRef.current = 0;
+    simTotalRef.current = 0;
+    // Reset UI state back to initial
+    setRunning(false);
+    setProgress(null);
+    setError(null);
+    setSelected(null);
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("infer_running");
+      localStorage.removeItem("infer_progress");
+      localStorage.removeItem("infer_countdown_end");
+    }
+    // clear any sample results shown
+    setSampleResults([]);
+  }
+
+  // Start a local dummy inference simulation
+  function startDummyInference(mode: "full" | "sample") {
+    // Clear prior sample results and reset view
+    setSampleResults([]);
+    setSamplePage(0);
+    // Configure simulation: total batches and interval
+    const total = mode === "sample" ? 4 : 30; // sample: 4 batches
+    const intervalMs = mode === "sample" ? Math.floor(10000 / 4) : 1200; // sample total ~10s
+    simTotalRef.current = total;
+    simBatchRef.current = 0;
+    setProgress({ batch: 0, total });
+    setRunning(true);
+    if (typeof window !== "undefined")
+      localStorage.setItem("infer_running", "true");
+
+    simTimerRef.current = window.setInterval(() => {
+      simBatchRef.current += 1;
+      setProgress({ batch: simBatchRef.current, total });
+      if (typeof window !== "undefined") {
+        localStorage.setItem(
+          "infer_progress",
+          JSON.stringify({ batch: simBatchRef.current, total })
+        );
+      }
+      // When complete
+      if (simBatchRef.current >= total) {
+        if (simTimerRef.current) {
+          window.clearInterval(simTimerRef.current);
+          simTimerRef.current = null;
+        }
+        setRunning(false);
+        if (typeof window !== "undefined") {
+          localStorage.setItem("infer_running", "false");
+        }
+        // If this was a sample run, generate sample results and display them
+        if (mode === "sample") {
+          const products = [
+            "'Ketchup', 'Shaving Cream', 'Light Bulbs'",
+            "'Ice Cream', 'Milk', 'Olive Oil', 'Bread', 'Potatoes'",
+            "'Spinach",
+            "'Tissues', 'Mustard'",
+            "'Dish Soap'",
+            "'Toothpaste', 'Chicken'",
+            "'Honey', 'BBQ Sauce', 'Soda', 'Olive Oil', 'Garden Hose'",
+            "'Syrup', 'Trash Cans', 'Pancake Mix', 'Water', 'Mayonnaise'",
+            "'Insect Repellent'",
+            "'Soap', 'Baby Wipes', 'Soda'",
+            "'Extension Cords', 'Soda', 'Water', 'Garden Hose', 'Cleaning Spray'",
+            "'Tea', 'Paper Towels', 'Spinach'",
+            "'Salmon', 'Shaving Cream'",
+            "'Trash Bags', 'Apple', 'Mop', 'Hair Gel'",
+            "'Razors', 'Laundry Detergent', 'Beef'",
+            "'Cereal', 'Vinegar', 'Bath Towels'",
+            "'Air Freshener', 'Feminine Hygiene Products'",
+            "'Power Strips', 'Honey', 'Ketchup', 'Tea', 'Shampoo'",
+            "'Mustard', 'Dustpan'",
+            "'Coffee' ",
+          ];
+          const intents = [
+            "Household restock ",
+            " Family dinner prep",
+            "Smoothie prep",
+            "Picnic prep",
+            "Dishwashing",
+            "Meal prep",
+            "Backyard BBQ",
+            "Weekend brunch prep",
+            " Outdoor camping",
+            "Household refreshments",
+            "Outdoor party prep",
+            "Healthy snacking",
+            "Dinner prep",
+            "Household maintenance",
+            "Meal prep and grooming",
+            "Household restocking",
+            "Personal care refresh",
+            "general groceries",
+            "Hot dog meal",
+          ];
+          // Generate 200 sample rows
+          const rows = Array.from({ length: 200 }).map((_, i) => ({
+            product: products[i % products.length],
+            intent: intents[i % intents.length],
+          }));
+          setSampleResults(rows);
+        }
+      }
+    }, intervalMs);
+  }
   return (
     <div className="min-h-screen flex flex-col bg-gradient-to-br from-[#000000] via-[#080645] to-[#260c2c] p-8">
-      <div className="max-w-xl mx-auto w-full">
+      <div className="max-w-4xl mx-auto w-full">
         <h2 className="text-3xl font-bold text-[#a259e6] mb-10 text-center">
           Select Inference Mode
         </h2>
         <p className="text-[#b0b3b8] text-base mb-10 text-center">
           Choose how you want to infer customer intents from your dataset.
         </p>
+        {/* Prominent countdown banner when waiting for full dataset availability */}
+        {countdown !== null && countdown > 0 && (
+          <div className="mb-6 p-4 rounded-lg bg-[#25102b] border border-[#a259e6]/40 text-center">
+            <div className="text-sm text-[#b0b3b8]">
+              Full dataset inference will be available in
+              <span className="ml-2 font-mono text-[#00e6e6]">
+                {formatCountdown(countdown)}
+              </span>
+            </div>
+            <div className="mt-2">
+              <button
+                className="px-3 py-1 rounded-md bg-red-600 text-white text-sm hover:bg-red-700"
+                onClick={() => stopCountdown()}
+              >
+                Cancel wait
+              </button>
+            </div>
+          </div>
+        )}
         <div className="flex flex-col sm:flex-row gap-6 justify-center mb-8">
           {options.map((opt) => (
             <button
@@ -257,6 +431,12 @@ export default function InferIntentsPage() {
               }
               setProgress(null);
               setError(null);
+              // Dummy mode: simulate locally
+              if (DUMMY_MODE) {
+                startDummyInference(selected as "full" | "sample");
+                return;
+              }
+              // Real backend path (unchanged)
               setRunning(true);
               if (typeof window !== "undefined") {
                 localStorage.setItem("infer_running", "true");
@@ -298,6 +478,24 @@ export default function InferIntentsPage() {
           >
             {running ? "Running..." : "Start"}
           </button>
+          {/* Show stop countdown button when waiting for the 1-hour hold */}
+          {/* {countdown !== null && countdown > 0 && (
+            <button
+              className="px-4 py-2 rounded-lg bg-red-600 text-white font-semibold hover:bg-red-700 transition"
+              onClick={() => stopCountdown()}
+            >
+              Cancel Wait
+            </button>
+          )} */}
+          {/* Show stop inference button when running */}
+          {running && (
+            <button
+              className="px-4 py-2 rounded-lg bg-red-600 text-white font-semibold hover:bg-red-700 transition"
+              onClick={() => stopInference()}
+            >
+              Stop Inference
+            </button>
+          )}
           {/* Modal for Full Dataset warning */}
           {showFullWarning && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-60">
@@ -332,6 +530,7 @@ export default function InferIntentsPage() {
                           "infer_countdown_end",
                           end.toString()
                         );
+                        setCountdownEnd(end);
                       }
                       setCountdown(3600); // 1 hour in seconds
                       setSelected(null); // force re-select after countdown
@@ -362,6 +561,98 @@ export default function InferIntentsPage() {
             </div>
           )}
           {error && <div className="text-red-400 mt-2">{error}</div>}
+
+          {sampleResults && sampleResults.length > 0 && (
+            <div className="w-full max-w-6xl mt-6 mx-auto bg-[#0f0b13] p-6 rounded-xl border border-[#44475a]">
+              <h4 className="text-lg font-semibold text-[#a259e6] mb-3">
+                Showing {samplePage * SAMPLE_PAGE_SIZE + 1} -{" "}
+                {Math.min(
+                  (samplePage + 1) * SAMPLE_PAGE_SIZE,
+                  sampleResults.length
+                )}{" "}
+                of {sampleResults.length} Results
+              </h4>
+              <div className="overflow-x-auto">
+                <table
+                  className="w-full text-sm text-left rounded-xl overflow-hidden"
+                  style={{
+                    background:
+                      "linear-gradient(180deg, #080645 0%, #260c2c 100%)",
+                  }}
+                >
+                  <thead>
+                    <tr className="bg-[#1a0824]">
+                      <th className="px-6 py-3 font-semibold text-[#00e6e6] text-left">
+                        #
+                      </th>
+                      <th className="px-6 py-3 font-semibold text-[#a259e6] text-left">
+                        Product
+                      </th>
+                      <th className="px-6 py-3 font-semibold text-[#00e6e6] text-left">
+                        Inferred Intent
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sampleResults
+                      .slice(
+                        samplePage * SAMPLE_PAGE_SIZE,
+                        (samplePage + 1) * SAMPLE_PAGE_SIZE
+                      )
+                      .map((r, idx) => (
+                        <tr
+                          key={samplePage * SAMPLE_PAGE_SIZE + idx}
+                          className={
+                            idx % 2 === 0
+                              ? "bg-[#23283a]/60"
+                              : "bg-[#0b0a0f]/80"
+                          }
+                        >
+                          <td className="px-6 py-3 text-[#00e6e6] font-medium">
+                            {samplePage * SAMPLE_PAGE_SIZE + idx + 1}
+                          </td>
+                          <td className="px-6 py-3 text-[#b0b3b8]">
+                            {r.product}
+                          </td>
+                          <td className="px-6 py-3 text-[#a259e6]">
+                            {r.intent}
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex justify-center items-center gap-6 mt-4">
+                <button
+                  className="px-4 py-2 rounded-lg bg-[#23283a] text-[#b0b3b8] font-semibold border border-[#44475a] hover:bg-[#23283a]/80 transition"
+                  onClick={() => setSamplePage((p) => Math.max(0, p - 1))}
+                  disabled={samplePage === 0}
+                  aria-label="Previous 10"
+                >
+                  <span className="text-2xl">&#8592;</span> Prev
+                </button>
+                <button
+                  className="px-4 py-2 rounded-lg bg-[#23283a] text-[#b0b3b8] font-semibold border border-[#44475a] hover:bg-[#23283a]/80 transition"
+                  onClick={() =>
+                    setSamplePage((p) =>
+                      Math.min(
+                        Math.floor(
+                          (sampleResults.length - 1) / SAMPLE_PAGE_SIZE
+                        ),
+                        p + 1
+                      )
+                    )
+                  }
+                  disabled={
+                    (samplePage + 1) * SAMPLE_PAGE_SIZE >= sampleResults.length
+                  }
+                  aria-label="Next 10"
+                >
+                  Next <span className="text-2xl">&#8594;</span>
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
