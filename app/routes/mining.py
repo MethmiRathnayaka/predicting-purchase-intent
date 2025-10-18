@@ -15,7 +15,7 @@ RULES_TABLE = "pivotal-canto-466205-p6.intent_inference.MiningResults"
 async def mine_rules():
     # --- Step 1: Fetch latest dataset_id ---
     try:
-        dataset_id = 1  # You can customize how you select the dataset_id
+        dataset_id = 1 # You can customize how you select the dataset_id
         if dataset_id is None:
             raise HTTPException(status_code=404, detail="No dataset found in Orders table.")
     except Exception as e:
