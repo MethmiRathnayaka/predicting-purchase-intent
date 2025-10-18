@@ -35,3 +35,6 @@ htmlcov/
 
 # Google Cloud credentials
 service-account-key.json
+
+node_modules/
+
