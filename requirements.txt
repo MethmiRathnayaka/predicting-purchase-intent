@@ -50,3 +50,5 @@ uvicorn==0.37.0
 mlxtend
 google-cloud-bigquery
 db-dtypes
+statsmodels
+plotly

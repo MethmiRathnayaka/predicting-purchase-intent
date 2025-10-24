@@ -1,10 +1,11 @@
 "use client";
 import React, { useState, useEffect } from "react";
 import dynamic from "next/dynamic";
+import { supabase } from "@/lib/supabaseClient";
+
 const RfmPieChart = dynamic(() => import("@/components/RfmPieChart"), {
   ssr: false,
 });
-import { supabase } from "@/lib/supabaseClient";
 
 type ForecastRecord = {
   Category: string;
@@ -37,28 +38,36 @@ export default function InsightsSuggestions() {
   // Forecast data
   const [forecastData, setForecastData] = useState<ForecastRecord[]>([]);
   const [selectedCategory, setSelectedCategory] = useState(categories[0]);
-  const [forecastLoading, setForecastLoading] = useState(false); // 👈 NEW
+  const [forecastLoading, setForecastLoading] = useState(false);
 
+  // Looker Studio embed link
+  const [lookerStudioSrc, setLookerStudioSrc] = useState("");
+
+  // Fetch RFM insights
   useEffect(() => {
     const fetchRfm = async () => {
-      const { data } = await supabase.auth.getUser();
-      const userId = data?.user?.id;
-      if (!userId) {
-        setLoading(false);
-        return;
-      }
-      fetch(`http://localhost:8000/rfm-insights?user_id=${userId}`)
-        .then((res) => res.json())
-        .then((data) => {
-          setRfmClusters(data.clusters || []);
+      try {
+        const { data } = await supabase.auth.getUser();
+        const userId = data?.user?.id;
+        if (!userId) {
           setLoading(false);
-        })
-        .catch(() => setLoading(false));
+          return;
+        }
+
+        const res = await fetch(`http://localhost:8000/rfm-insights?user_id=${userId}`);
+        const json = await res.json();
+        setRfmClusters(json.clusters || []);
+      } catch (error) {
+        console.error("Failed to fetch RFM data:", error);
+      } finally {
+        setLoading(false);
+      }
     };
+
     fetchRfm();
   }, []);
 
-  // Load forecast.json once
+  // Load forecast.json
   useEffect(() => {
     fetch("/forecast.json")
       .then((res) => res.json())
@@ -66,33 +75,43 @@ export default function InsightsSuggestions() {
       .catch((err) => console.error("Error loading forecast data:", err));
   }, []);
 
-  // Looker Studio params (unchanged)
-  const dataset_id_value = 1;
-  const parameterId = "dataset_id";
-  const reportId = "5841b56f-c70e-4aba-8bbb-49c8bcd2457f";
-  const pageId = "GPoaF";
-  const paramsObject: Record<string, string> = {};
-  paramsObject[parameterId] = dataset_id_value.toString();
-  const encodedParams = encodeURIComponent(JSON.stringify(paramsObject));
-  const lookerStudioSrc = `https://lookerstudio.google.com/embed/reporting/${reportId}/page/${pageId}?params=${encodedParams}`;
+  // Generate Looker Studio URL dynamically after user loads
+  useEffect(() => {
+    const fetchUserAndSetURL = async () => {
+      const { data } = await supabase.auth.getUser();
+      const userId = data?.user?.id;
+      if (!userId) return;
 
-  // Forecast data for selected category
-  const selectedForecastRows = forecastData.filter(
-    (row) => row.Category === selectedCategory
-  );
+      const parameterId = "user_id";
+      const reportId = "5841b56f-c70e-4aba-8bbb-49c8bcd2457f";
+      const pageId = "GPoaF";
 
-  // Helper for image file names
-  const formatCategoryForFilename = (cat: string) => cat.replace(/\s+/g, "_");
+      const paramsObject: Record<string, string> = {};
+      paramsObject[parameterId] = userId.toString();
+      const encodedParams = encodeURIComponent(JSON.stringify(paramsObject));
+      const url = `https://lookerstudio.google.com/embed/reporting/${reportId}/page/${pageId}?params=${encodedParams}`;
+      setLookerStudioSrc(url);
+    };
 
-  // 👇 NEW — handle dropdown change with simulated delay
+    fetchUserAndSetURL();
+  }, []);
+
+  // Category change handler
   const handleCategoryChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newCategory = e.target.value;
     setForecastLoading(true);
     setTimeout(() => {
       setSelectedCategory(newCategory);
       setForecastLoading(false);
-    }, 600); // ~0.6s feels natural, not too long
+    }, 600);
   };
+
+  // Filter forecast data
+  const selectedForecastRows = forecastData.filter(
+    (row) => row.Category === selectedCategory
+  );
+
+  const formatCategoryForFilename = (cat: string) => cat.replace(/\s+/g, "_");
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-[#000000] via-[#080645] to-[#260c2c] py-8">
@@ -100,9 +119,7 @@ export default function InsightsSuggestions() {
       <div className="w-full max-w-6xl grid grid-cols-1 md:grid-cols-2 gap-8">
         {/* RFM Cluster Table + Pie Chart */}
         <div className="bg-[#1a0824]/80 rounded-xl p-6 shadow-lg border border-[#a259e6]/40">
-          <h3 className="text-xl font-semibold text-[#00e6e6] mb-4">
-            RFM Segments
-          </h3>
+          <h3 className="text-xl font-semibold text-[#00e6e6] mb-4">RFM Segments</h3>
           {loading ? (
             <div className="flex flex-col items-center justify-center py-8">
               <svg
@@ -162,23 +179,55 @@ export default function InsightsSuggestions() {
           )}
         </div>
 
-        {/* Rule Mining  */}
+        {/* Rule Mining */}
         <div className="bg-[#1a0824]/80 rounded-xl p-6 shadow-lg border border-[#a259e6]/40">
-          <h3 className="text-xl font-semibold text-[#00e6e6] mb-4">
-            Rule Mining
-          </h3>
-          <iframe
-            width="100%"
-            height="450"
-            src={lookerStudioSrc}
-            allowFullScreen
-            sandbox="allow-storage-access-by-user-activation allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
-          ></iframe>
+          <h3 className="text-xl font-semibold text-[#00e6e6] mb-4">Rule Mining</h3>
+          <button
+            onClick={async () => {
+              try {
+                const { data } = await supabase.auth.getUser();
+                const userId = data?.user?.id;
+                if (!userId) {
+                  alert("User not logged in.");
+                  return;
+                }
+
+                const res = await fetch("http://localhost:8000/mining", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ user_id: userId }),
+                });
+
+                const dataRes = await res.json();
+                alert(
+                  dataRes.message ||
+                    `Rule mining finished! Found ${dataRes.rules_count} rules.`
+                );
+                console.log("Rule mining response:", dataRes);
+              } catch (err) {
+                console.error("Failed to call rule mining API:", err);
+                alert("Error: Could not connect to backend.");
+              }
+            }}
+            className="mb-4 px-4 py-2 bg-[#a259e6] hover:bg-[#8c3fe0] text-white font-semibold rounded-lg shadow-md transition"
+          >
+            Run Rule Mining
+          </button>
+
+          {lookerStudioSrc ? (
+            <iframe
+              width="100%"
+              height="450"
+              src={lookerStudioSrc}
+              allowFullScreen
+              sandbox="allow-storage-access-by-user-activation allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+            ></iframe>
+          ) : (
+            <div className="text-[#b0b3b8]">Loading report...</div>
+          )}
+
           <div className="mt-4 text-center text-[#b0b3b8] text-sm">
-            <span>
-              <b>Tip:</b> Click on a row to see the intent behind why they were
-              bought together.
-            </span>
+            <b>Tip:</b> Click on a row to see the intent behind why they were bought together.
           </div>
         </div>
 
@@ -188,7 +237,6 @@ export default function InsightsSuggestions() {
             Time Series Forecasting
           </h3>
 
-          {/* Category Dropdown */}
           <div className="mb-4">
             <label className="text-[#b0b3b8] mr-2">Select Category:</label>
             <select
@@ -204,7 +252,6 @@ export default function InsightsSuggestions() {
             </select>
           </div>
 
-          {/* Forecast section with loading spinner */}
           {forecastLoading ? (
             <div className="flex flex-col items-center justify-center py-8">
               <svg
@@ -231,7 +278,6 @@ export default function InsightsSuggestions() {
             </div>
           ) : (
             <>
-              {/* Forecast Metrics Table */}
               {selectedForecastRows.length > 0 ? (
                 <div className="overflow-x-auto mb-6">
                   <table className="min-w-full text-sm text-left text-[#b0b3b8]">
@@ -256,19 +302,14 @@ export default function InsightsSuggestions() {
                   </table>
                 </div>
               ) : (
-                <div className="text-[#b0b3b8]">
-                  No forecast data available.
-                </div>
+                <div className="text-[#b0b3b8]">No forecast data available.</div>
               )}
 
-              {/* ACF / PACF Images */}
               <div className="flex flex-wrap justify-center gap-8">
                 <div className="flex flex-col items-center">
                   <p className="text-[#b0b3b8] mb-2">ACF Plot</p>
                   <img
-                    src={`/assets_DSE/acf_${formatCategoryForFilename(
-                      selectedCategory
-                    )}.png`}
+                    src={`/assets_DSE/acf_${formatCategoryForFilename(selectedCategory)}.png`}
                     alt={`ACF ${selectedCategory}`}
                     className="max-w-xs rounded-lg border border-[#a259e6]/40"
                   />
@@ -276,9 +317,7 @@ export default function InsightsSuggestions() {
                 <div className="flex flex-col items-center">
                   <p className="text-[#b0b3b8] mb-2">PACF Plot</p>
                   <img
-                    src={`/assets_DSE/pacf_${formatCategoryForFilename(
-                      selectedCategory
-                    )}.png`}
+                    src={`/assets_DSE/pacf_${formatCategoryForFilename(selectedCategory)}.png`}
                     alt={`PACF ${selectedCategory}`}
                     className="max-w-xs rounded-lg border border-[#a259e6]/40"
                   />
